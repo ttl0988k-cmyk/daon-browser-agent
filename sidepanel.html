@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DAON Browser Agent</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body class="daon-dark">
+  <!-- Top Navigation Header -->
+  <header class="app-header">
+    <div class="brand-row">
+      <div class="brand-left">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <span class="brand-title">DAON</span>
+          <span class="brand-sub">Side Panel</span>
+        </div>
+      </div>
+      <div class="brand-right">
+        <button id="connectionBadge" class="status-badge checking" title="서버 상태 (클릭하여 재연결)">
+          <span class="status-dot"></span>
+          <span class="status-text">확인 중</span>
+        </button>
+        <button id="clearChatBtn" class="clear-chat-btn" title="대화 내용 지우기 및 새 세션">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          <span>대화 지우기</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Model & Agent Selection Row -->
+    <div class="model-select-row">
+      <div class="model-select-box" title="DAON에 연결된 AI 모델 선택">
+        <span class="model-icon">⚡</span>
+        <select id="modelSelect" class="model-dropdown">
+          <option value="">모델 불러오는 중...</option>
+        </select>
+      </div>
+      <div class="agent-profile-box" title="현재 활성 에이전트 프로필">
+        <span class="agent-icon">👤</span>
+        <span id="agentProfileName">raon</span>
+      </div>
+    </div>
+
+    <!-- Active Tab Context Card -->
+    <div class="tab-context-bar" id="tabContextBar">
+      <div class="tab-info" id="activeTabInfo" title="현재 활성화된 탭 및 열린 탭">
+        <span class="tab-icon">🌐</span>
+        <span class="tab-title" id="activeTabTitle">페이지 로드 중...</span>
+        <span class="tabs-count-badge" id="tabsCountBadge">1개 탭</span>
+      </div>
+      <button id="autoContextToggle" class="attach-chip active" title="모든 탭과 현재 페이지 정보를 질문 시 자동으로 에이전트에게 전송합니다 (클릭하여 켜기/끄기)">
+        <span class="chip-icon">⚡</span>
+        <span class="chip-label" id="autoContextLabel">자동 탭 감지 ON</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Quick Action Chips -->
+  <div class="quick-toolbar">
+    <button class="quick-chip" id="quickListTabsBtn">
+      <span>📑 열린 탭 확인</span>
+    </button>
+    <button class="quick-chip" id="quickSummarizeBtn">
+      <span>📄 이 페이지 요약</span>
+    </button>
+    <button class="quick-chip" id="quickFindBtn">
+      <span>🔍 핵심 정보 찾기</span>
+    </button>
+    <button class="quick-chip" id="quickSnapshotBtn">
+      <span>🤖 대화형 요소 탐색</span>
+    </button>
+  </div>
+
+  <!-- Chat Messages Container -->
+  <main class="chat-container" id="chatContainer">
+    <div class="welcome-card" id="welcomeCard">
+      <div class="welcome-icon">✨</div>
+      <h3>DAON Browser Assistant</h3>
+      <p>웹 브라우징 중 언제든 질문하고, 페이지 분석과 실제 조작(클릭/입력)을 요청해 보세요.</p>
+      <div class="example-prompts">
+        <button class="example-chip" data-prompt="지금 열려 있는 모든 브라우저 탭 목록을 확인해서 알려줘.">"열려 있는 탭 목록 확인"</button>
+        <button class="example-chip" data-prompt="네이버(naver.com)로 이동해줘.">"네이버로 이동해줘"</button>
+        <button class="example-chip" data-prompt="지금 보고 있는 웹페이지의 핵심 내용을 3줄로 요약해줘.">"이 페이지 3줄 요약해줘"</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Bottom Input Bar -->
+  <footer class="input-container">
+    <!-- Active Context Pill (Optional) -->
+    <div class="attached-pill hidden" id="attachedPill">
+      <span class="pill-dot"></span>
+      <span class="pill-text" id="attachedPillText">현재 탭 첨부됨</span>
+      <button class="pill-remove" id="removeAttachedBtn" title="첨부 취소">&times;</button>
+    </div>
+
+    <div class="input-box">
+      <textarea
+        id="userInput"
+        rows="1"
+        placeholder="다온에게 지시하세요... (Enter: 전송, Shift+Enter: 줄바꿈)"
+      ></textarea>
+      <div class="input-actions">
+        <button id="sendBtn" class="send-btn" title="전송">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="input-footer">
+      <span class="footer-hint">연결: 127.0.0.1:9090 · DOM 직접 제어 지원</span>
+    </div>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DAON Browser Agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DAON Agent System Side Panel Assistant & Real-time Browser Controller",
   "permissions": [
     "sidePanel",

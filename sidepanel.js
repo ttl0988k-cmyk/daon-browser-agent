@@ -337,14 +337,13 @@ async function extractTabContextSilently(tab = null) {
   } catch (err) {
     // Content script가 아직 로드되지 않은 경우 무소음 동적 주입 시도
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId: target.id },
-        files: ['content.js']
-      });
-      await chrome.scripting.insertCSS({
-        target: { tabId: target.id },
-        files: ['content.css']
-      });
+      // ── [2026-09-19 3차] ensureContentScript 로 통일 ──────────────────────
+      // ⚠️ 종전에는 여기서 플래그 리셋 없이 그냥 executeScript 했다.
+      //    확장 리로드 후에는 __daonContentScriptLoaded 가 isolated world 에 남아
+      //    content.js 가 조용히 return → "주입했는데 여전히 응답 없음" → 아래 폴백으로
+      //    떨어졌다. 즉 **매 턴 실행되는 자동 컨텍스트 수집이 조용히 열화**되고 있었다.
+      //    (에이전트가 페이지 컨텍스트 없이 판단하게 되는 조용한 오작동)
+      await ensureContentScript(target.id);
       const res2 = await chrome.tabs.sendMessage(target.id, { action: 'GET_PAGE_CONTEXT' }, { frameId: 0 });
       if (res2 && res2.ok && res2.data && res2.data.url && res2.data.url !== 'about:blank') {
         if (!res2.data.title || res2.data.title === 'about:blank') {
@@ -496,6 +495,12 @@ async function handleSwitchTab(identifier) {
   if (targetTab) {
     await chrome.tabs.update(targetTab.id, { active: true });
     await updateActiveTabAndTabs();
+    // ── [2026-09-19 3차] 전환 직후 콘텐츠 스크립트 선제 보장 ──────────────────
+    // 실측: SWITCH_TAB("284440455" → opencode.ai) 성공 → SNAPSHOT 즉시 실패
+    //       (250ms 재시도까지 소진). 무거운 SPA 는 주입이 늦고, 확장 리로드 후
+    //       백그라운드 탭은 orphaned 상태라 재시도로는 영영 복구되지 않는다.
+    //       여기서 미리 재주입해 두면 후속 snapshot/click 이 첫 시도에 성공한다.
+    try { await ensureContentScript(targetTab.id); } catch (_) {}
     return { ok: true, tab: targetTab };
   }
   return { ok: false, error: `일치하는 탭을 찾을 수 없습니다: "${identifier}"` };
@@ -531,30 +536,116 @@ async function handleCloseTab(identifier) {
   return { ok: false, error: `닫을 탭을 찾을 수 없습니다: "${identifier}"` };
 }
 
+// ── ★ [4차] 인터랙션 후 정착 대기 (jev 이식) ────────────────────────────────
+// 원본 design.md: "The next observation waits for up to two animation frames
+//   or 50 ms after an interaction."
+//   종전 우리는 300ms 고정으로 기다렸다 → 원본 대비 6배 느림.
+//   2 RAF 는 "다음 페인트 2회"를 기다리는 최소 단위라, 동적 DOM 갱신을
+//   놓치지 않으면서 고정 지연을 줄인다. 실패하면 기존 백오프가 받쳐준다.
+async function settle() {
+  try {
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  } catch (e) {}
+  await new Promise(r => setTimeout(r, 50));
+}
+
+// ── [2026-09-19 3차] content script 준비 보장 (자동 복구) ────────────────────
+// 문제 2종:
+//   ① 확장 리로드 후 기존 탭의 content script 는 orphaned(컨텍스트 무효화) 된다.
+//      chrome.tabs.sendMessage 가 "Could not establish connection" 으로 실패하고,
+//      이건 **영구 실패**다 — 재시도로는 절대 복구되지 않고 F5 만이 해결이었다.
+//   ② 탭 전환 직후엔 아직 응답 준비 전이라 일시 실패한다(타이밍 경합).
+// 해법: PING → 실패 시 재주입(플래그 리셋 포함) → PING 폴링.
+//       성공 경로에서는 핑 1회만 지불하므로 지연이 사실상 0이다.
+//    실측(2026-09-19, opencode.ai): SWITCH_TAB 성공 → SNAPSHOT 실패(250ms 재시도 포함).
+//      opencode.ai 는 무거운 SPA 라 250ms 1회 재시도로는 부족했다.
+async function ensureContentScript(tabId) {
+  if (!tabId) return false;
+
+  // 1) 살아있는지 가벼운 핑으로 확인
+  try {
+    const pong = await chrome.tabs.sendMessage(tabId, { action: 'PING' }, { frameId: 0 });
+    if (pong && pong.ok) return true;
+  } catch (_) { /* 죽었음 → 재주입으로 진행 */ }
+
+  if (!chrome.scripting) return false;
+
+  // 2) orphaned 플래그 리셋
+  //    ⚠️ chrome.scripting.executeScript 는 content script 와 같은 isolated world 에서
+  //       실행되므로, 여기서 리셋해야 content.js 의 중복 주입 가드가 통과한다.
+  //       (리셋 없이는 재주입이 조용히 skip 되어 "주입했는데 응답 없음"이 된다)
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      func: () => { window.__daonContentScriptLoaded = false; }
+    });
+  } catch (_) {}
+
+  // 3) content.js (+css) 재주입
+  try {
+    await chrome.scripting.insertCSS({ target: { tabId, allFrames: false }, files: ['content.css'] });
+  } catch (_) {}
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ['content.js']
+    });
+  } catch (e) {
+    console.warn('[DAON Agent] content.js 재주입 실패:', e && e.message);
+    return false;
+  }
+
+  // 4) 주입 직후 응답 준비 대기 — 짧은 폴링으로 재핑
+  for (let i = 0; i < 4; i++) {
+    await new Promise(r => setTimeout(r, 120));
+    try {
+      const pong = await chrome.tabs.sendMessage(tabId, { action: 'PING' }, { frameId: 0 });
+      if (pong && pong.ok) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
 async function executeBrowserAction(action, payload) {
   if (!activeTab || !activeTab.id) {
     await updateActiveTabAndTabs();
   }
   if (!activeTab || !activeTab.id) return { ok: false, error: '활성 탭 없음' };
 
+  const tabId = activeTab.id;
+  const send = () => chrome.tabs.sendMessage(tabId, { action, ...payload }, { frameId: 0 });
+
   try {
     // ⚠️ frameId: 0 지정하여 서브프레임(광고/트래커 등) 배제하고 메인 프레임에만 메시지 송신
-    const response = await chrome.tabs.sendMessage(activeTab.id, {
-      action,
-      ...payload
-    }, { frameId: 0 });
-    return response;
+    return await send();
   } catch (err) {
+    // ⚠️ [2026-09-19 3차] 1차 실패 시 content script 자체를 보장한다.
+    //    확장 리로드로 orphaned 된 경우엔 재시도만으로 영원히 실패하므로 재주입이 필수.
+    await ensureContentScript(tabId);
+
+    // 재주입/대기 후 백오프 재시도 (250 → 600 → 1200ms, 총 ~2초)
+    const delays = [250, 600, 1200];
+    for (const d of delays) {
+      await new Promise(r => setTimeout(r, d));
+      try {
+        const retryRes = await send();
+        if (retryRes && retryRes.ok !== false) return retryRes;
+        // ok:false 응답이면 정상 응답이므로 그대로 반환(재시도 무의미)
+        if (retryRes) return retryRes;
+      } catch (_retryErr) {}
+    }
+
     try {
       // 구형 환경 또는 예외 시 브로드캐스트 폴백
-      const fallbackRes = await chrome.tabs.sendMessage(activeTab.id, {
-        action,
-        ...payload
-      });
+      const fallbackRes = await chrome.tabs.sendMessage(tabId, { action, ...payload });
       return fallbackRes;
     } catch (e2) {
       console.error('브라우저 액션 실행 오류:', err);
-      return { ok: false, error: err.message };
+      return {
+        ok: false,
+        error: err.message,
+        hint: '대상 탭에서 새로고침(F5) 후 다시 시도하세요.'
+      };
     }
   }
 }
@@ -687,7 +778,7 @@ async function sendMessage(customText = null, isAutoFollowup = false) {
 4. [실시간 조작 액션 태그]: 브라우저 조작이 필요할 때는 반드시 아래의 XML 액션 태그를 응답에 포함하세요. 크롬 확장 프로그램이 실제 브라우저에서 즉시 실행합니다:
    - 버튼/카드/링크 클릭: <daon_action action="click" nodeId="12" />  ★권장  /  또는 <daon_action action="click" target="버튼텍스트 또는 CSS셀렉터" nth="1" />
    - 마우스 호버(드롭다운/메뉴 열기): <daon_action action="hover" nodeId="12" />  ★권장  /  또는 <daon_action action="hover" target="메뉴텍스트 또는 셀렉터" nth="1" />
-   - 키보드 입력(Enter, Escape 등): <daon_action action="press" key="Enter" target="입력창(선택)" />
+   - 키보드 입력(Enter, Escape 등): <daon_action action="press" key="Enter" nodeId="3" />  ★권장  /  또는 <daon_action action="press" key="Enter" target="입력창(선택)" />
    - 대화형 요소 스냅샷 추출: <daon_action action="snapshot" />
    - 현재 화면 캡처(스크린샷): <daon_action action="screenshot" />
    - 잠시 대기(로딩 대기 등): <daon_action action="wait" ms="1500" />
@@ -697,11 +788,13 @@ async function sendMessage(customText = null, isAutoFollowup = false) {
    - 탭 닫기: <daon_action action="close_tab" tab_id="탭ID" />
    - 텍스트 입력: <daon_action action="type" nodeId="3" text="입력내용" />  ★권장  /  또는 <daon_action action="type" target="입력창ID/셀렉터" text="입력내용" nth="1" />
    - 스크롤: <daon_action action="scroll" direction="down|up" />
+   - 드롭다운 선택(네이티브 select): <daon_action action="select" nodeId="7" value="Design" />  ★ 스냅샷에 →select="값" 이 보이면 그 값을 쓰세요.
    ⚠️ [요소 지정 규칙 — nodeId 우선 (필수)]:
    - 먼저 <daon_action action="snapshot" /> 로 스냅샷을 찍으면 각 요소에 nodeId가 함께 표시됩니다. 예: [#3|nodeId=7] <button> "검색"
    - 클릭/호버/입력은 반드시 그 nodeId로 지정하세요 (예: <daon_action action="click" nodeId="7" />). nodeId는 스냅샷 시점의 정확한 요소를 가리킵니다.
    - 스냅샷 이후 페이지가 바뀌면 실행이 자동으로 거부됩니다(엉뚱한 요소 조작 방지). 이때 [⚠️ 페이지 변경 감지] 안내가 오므로, 다시 스냅샷을 찍고 새 nodeId로 재시도하세요. 같은 nodeId로 반복 시도하지 마세요.
    - nodeId가 없는 요소에 한해서만 target=셀렉터를 사용하세요.
+   - type/click/press가 "가려져 있습니다(covered)"로 거부되면 확장이 자동으로 오버레이(자동완성 드롭다운)를 걷어내고 1회 재판정합니다. 그래도 실패하면 다시 스냅샷을 찍으세요.
    ⚠️ [텍스트/프롬프트 입력 필수 규칙 — 구글 플로우/ChatGPT 등 봇 감지 회피]:
    - 단어, 문장, 검색어, 프롬프트 등 모든 텍스트는 반드시 단 1개의 <daon_action action="type" target="프롬프트창 또는 셀렉터" text="완전한 문자열" /> 태그로 입력하세요!
    - 확장 프로그램 시스템이 브라우저 내부에서 실제 사람처럼 한 글자씩 무작위 지연(25~65ms)을 주며 휴먼 리듬으로 자동 타이핑하므로, 봇 감지가 완벽히 회피됩니다.
@@ -997,7 +1090,7 @@ async function parseAndExecuteActions(text, bubble) {
         summary: `CLICK(${label}${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
           (res.stale ? ' [⚠️ 페이지 변경 감지 — 페이지가 바뀌었으니 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
       });
-      if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
+      if (res.ok) await settle();   // [4차] 300ms 고정 → 2 RAF or 50ms
     }
     // 6. 마우스 호버 (hover)
     else if (action === 'hover' && (target || nodeIdVal !== null)) {
@@ -1010,15 +1103,20 @@ async function parseAndExecuteActions(text, bubble) {
         summary: `HOVER(${label}${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
           (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
       });
-      if (res.ok) await new Promise(resolve => setTimeout(resolve, 200));
+      if (res.ok) await settle();   // [4차] 200ms 고정 → 2 RAF or 50ms
     }
     // 7. 키보드 입력 (press / key)
     else if (action === 'press' || action === 'key') {
-      const card = appendActionCard(bubble, `⌨️ [키 입력] [${keyVal}] 실행 중...`);
-      const res = await executeBrowserAction('ACT_PRESS_KEY', { key: keyVal, target, nth });
+      const keyLabel = nodeIdVal !== null ? `요소 #${nodeIdVal}` : (target ? `"${target}"` : '현재 포커스');
+      const card = appendActionCard(bubble, `⌨️ [키 입력] [${keyVal}] → ${keyLabel} 실행 중...`);
+      const res = await executeBrowserAction('ACT_PRESS_KEY',
+        nodeIdVal !== null ? { key: keyVal, nodeId: nodeIdVal } : { key: keyVal, target, nth });
       updateActionCard(card, res.ok ? `✅ ${res.message}` : `❌ 키 입력 실패: ${res.error}`, !res.ok);
-      lastActionResults.push({ summary: `PRESS_KEY("${keyVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` });
-      if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
+      lastActionResults.push({
+        summary: `PRESS_KEY("${keyVal}"${nodeIdVal !== null ? `, 요소 #${nodeIdVal}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
+          (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
+      });
+      if (res.ok) await settle();   // [4차] 300ms 고정 → 2 RAF or 50ms
     }
     // 8. 텍스트 입력 (type) — nodeId 우선
     else if (action === 'type' && (target || nodeIdVal !== null)) {
@@ -1031,7 +1129,24 @@ async function parseAndExecuteActions(text, bubble) {
         summary: `TYPE(${label}, "${inputVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
           (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
       });
-      if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
+      if (res.ok) await settle();   // [4차] 300ms 고정 → 2 RAF or 50ms
+    }
+    // 8-b. 셀렉트 옵션 선택 (select) — 네이티브 <select> 전용 [4차 jev 이식]
+    //   원본 browser.py L152~157: '관찰된 옵션'에서만 고르고 input+change 를 함께 디스패치.
+    //   스냅샷이 노출한 selectValue 를 value 로 넘긴다.
+    //   사용: <daon_action action="select" nodeId="7" value="Design" />
+    else if (action === 'select' && (target || nodeIdVal !== null)) {
+      const selVal = getAttr('value') || getAttr('select_value') || inputVal || '';
+      const label = nodeIdVal !== null ? `요소 #${nodeIdVal}` : `"${target}"`;
+      const card = appendActionCard(bubble, `📋 [선택] ${label} → "${selVal}" 선택 중...`);
+      const res = await executeBrowserAction('ACT_SELECT',
+        nodeIdVal !== null ? { nodeId: nodeIdVal, value: selVal } : { target, nth, value: selVal });
+      updateActionCard(card, res.ok ? `✅ ${res.message}` : `❌ 선택 실패: ${res.error}`, !res.ok);
+      lastActionResults.push({
+        summary: `SELECT(${label}, "${selVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
+          (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
+      });
+      if (res.ok) await settle();
     }
     // 9. 잠시 대기 (wait) — 0.5초 이하는 카드를 띄우지 않고 조용히 대기 (화면 도배 방지)
     else if (action === 'wait') {
@@ -1078,7 +1193,7 @@ async function parseAndExecuteActions(text, bubble) {
         // ★ nodeId를 함께 노출 — 클릭/입력 시 selector 재탐색 대신 nodeId로 지정하면
         //   스냅샷 시점과 동일한 요소가 보장되고, 페이지가 바뀌면 실행이 거부된다.
         const summary = res.data.slice(0, 30).map(it =>
-          `[#${it.index}|nodeId=${it.nodeId}] <${it.role || it.tag}> "${it.text}"${it.value ? ` 값="${it.value}"` : ''} (${it.selector})`
+          `[#${it.index}|nodeId=${it.nodeId}] <${it.role || it.tag}> "${it.text}"${it.value ? ` 값="${it.value}"` : ''}${it.selectValue ? ` →select="${it.selectValue}"` : ''} (${it.selector})`
         ).join('\n');
         updateActionCard(card, `✅ 스냅샷 완료 (총 ${res.data.length}개 요소 감지)`);
         lastActionResults.push({ summary: `SNAPSHOT(): 성공 (총 ${res.data.length}개 대화형 요소 감지됨):\n${summary}` });

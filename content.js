@@ -8,6 +8,12 @@
   if (!window.location.href || window.location.href === 'about:blank' || window.location.href.startsWith('data:')) {
     return;
   }
+  // ── [2026-09-19 3차] 중복 주입 가드 ───────────────────────────────────────
+  // ⚠️ 함정: 확장을 리로드하면 기존 탭의 content script는 orphaned(컨텍스트 무효화)가
+  //    되지만, 이 플래그는 isolated world에 그대로 남는다. 그 상태로
+  //    chrome.scripting.executeScript 로 재주입하면 여기서 조용히 return 되어
+  //    "주입했는데도 여전히 응답 없음"이 된다.
+  //    → sidepanel 이 재주입 직전에 window.__daonContentScriptLoaded = false 로 리셋한다.
   if (window.__daonContentScriptLoaded) return;
   window.__daonContentScriptLoaded = true;
 
@@ -101,6 +107,99 @@
         __daonReg.guards.delete(id);
       }
     }
+  }
+
+  // ── [2026-09-19 4차] pageKey — 문서 전체 지문 (jev 이식) ────────────────────
+  // 원본 snapshot.js L44~46:
+  //   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,
+  //     innerWidth,innerHeight,[...querySelectorAll('input,textarea,select')]
+  //       .filter(safe).map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])]
+  //
+  // 목적: guard 는 '그 요소'만 본다. 그래서 SPA 가 DOM 을 재사용한 채 라우팅만
+  //       바꾸거나, 같은 폼의 다른 필드 값이 바뀐 경우를 못 잡는다.
+  //       pageKey 는 문서 신원(URL/뷰포트/스크롤) + 모든 폼 값 상태를 담아
+  //       그 구멍을 메운다. 원본 fresh() 는 [page_key, guard] 를 함께 비교한다
+  //       (browser.py L88~98).
+  //
+  // ⚠️ 원본은 identity(e) 를 호출해 새 요소에 ID 를 '부여'한다. 그런데 pageKey 를
+  //    실행 시점(fresh)에도 호출하므로 비교 중에 ID 가 늘어날 수 있다.
+  //    우리는 실행 시점에는 ids.get(el) 로 '읽기만' 해서 이 비대칭을 제거한다.
+  const PAGEKEY_FIELDS = ['timeOrigin', 'url', 'scrollX', 'scrollY', 'innerWidth', 'innerHeight', 'formState'];
+
+  function pageKeyOf() {
+    return [
+      performance.timeOrigin,
+      location.href,
+      window.scrollX,
+      window.scrollY,
+      window.innerWidth,
+      window.innerHeight,
+      Array.from(document.querySelectorAll('input,textarea,select'))
+        .filter(el => !['password', 'file', 'hidden'].includes(el.type))
+        .map(el => [
+          __daonReg.ids.get(el) ?? null,   // ★ 읽기 전용 (원본 identity() 부작용 제거)
+          el.value, el.checked, el.selectedIndex, el.disabled, el.readOnly
+        ])
+    ];
+  }
+
+  // pageKey 비교 — 다르면 변경된 필드 이름 배열을 돌려준다(없으면 null)
+  function pageKeyDiff(before, now) {
+    if (!before || !now) return null;
+    const len = Math.min(before.length, now.length);
+    const changed = [];
+    for (let i = 0; i < len; i++) {
+      const a = typeof before[i] === 'object' ? JSON.stringify(before[i]) : String(before[i] ?? '');
+      const b = typeof now[i] === 'object' ? JSON.stringify(now[i]) : String(now[i] ?? '');
+      if (a !== b) changed.push(PAGEKEY_FIELDS[i] || `pk${i}`);
+    }
+    return changed.length ? changed : null;
+  }
+
+  // ── [4차] combobox 타이핑 후 제안 대기 (jev 이식) ───────────────────────────
+  // 원본 design.md: "Editable ARIA comboboxes instead wait for visible options,
+  //   capped at 200 ms. This avoids paying for a prediction before autocomplete
+  //   suggestions arrive."
+  //
+  // 우리가 covered 자동 복구로 '사후' 우회하던 문제를 원본은 '예방'한다.
+  // 자동완성 드롭다운이 뜨는 것을 기다려 준 뒤 다음 액션으로 넘어가면,
+  // 오버레이가 입력창을 덮은 상태를 애초에 만들지 않는다.
+  function isComboboxLike(el) {
+    if (!el) return false;
+    if (accRole(el) === 'combobox') return true;
+    if (el.getAttribute('aria-controls')) return true;
+    if (el.getAttribute('list')) return true;
+    if (el.getAttribute('aria-autocomplete')) return true;
+    return false;
+  }
+
+  async function waitForSuggestions(el, maxMs = 200) {
+    if (!isComboboxLike(el)) return false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      await sleep(25);
+      try {
+        // 제안 목록이 실제로 보이는가 (role=option / listbox / datalist / aria-expanded)
+        const opts = document.querySelectorAll(
+          '[role="option"],[role="listbox"] option,datalist option,[role="listbox"] [role="option"]');
+        for (const o of opts) {
+          if (isElementVisible(o)) return true;
+        }
+        if (el.getAttribute('aria-expanded') === 'true') return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  // ── [4차] 인터랙션 후 정착 대기 (jev 이식) ─────────────────────────────────
+  // 원본 design.md: "The next observation waits for up to two animation frames
+  //   or 50 ms after an interaction."
+  //   우리는 sidepanel 에서 300ms 고정으로 기다리고 있었다 → 6배 느림.
+  async function settleAfterInteraction() {
+    try {
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    } catch (e) {}
+    await sleep(50);
   }
 
   // 접근성 이름 계산 — jev snapshot.js name() 이식
@@ -233,10 +332,102 @@
         };
       }
     }
+    // ── ★ [4차] 문서 전체 지문 비교 (jev fresh() 이식) ──────────────────────
+    // guard 는 '그 요소'만 본다 → SPA 가 DOM 을 재사용한 채 라우팅만 바꾸거나,
+    // 같은 폼의 다른 필드가 바뀐 경우를 못 잡는다. pageKey 가 그 구멍을 메운다.
+    // 원본 browser.py L88~98 이 [page_key, guard] 를 함께 비교하는 것과 동일.
+    if (__daonReg.pageKey) {
+      const pkChanged = pageKeyDiff(__daonReg.pageKey, pageKeyOf());
+      if (pkChanged) {
+        return {
+          ok: false, reason: 'stale', changed: pkChanged,
+          error: `문서 상태가 스냅샷 이후 변경되었습니다(${pkChanged.join(', ')}). 다시 스냅샷을 찍으세요.`
+        };
+      }
+    }
     if (isCovered(el)) {
       return { ok: false, reason: 'covered', error: `요소 #${nodeId}가 다른 요소에 가려져 있습니다(오버레이/스크롤). 다시 스냅샷을 찍으세요.` };
     }
     return { ok: true, el };
+  }
+
+  // ── [2026-09-19 추가] covered 자동 복구 ────────────────────────────────────
+  // 문제: 검색창을 클릭하면 자동완성 드롭다운이 뜨는데, 그 오버레이가 검색창 자체를
+  //       덮어 isCovered()가 true가 된다 → type/click이 'covered'로 거부되고
+  //       에이전트가 "다시 스냅샷"만 반복하다 검색 자동화가 매번 막힌다.
+  // 해법: covered일 때만 (1) 오버레이 바깥 클릭 → (2) Escape 순으로 닫고 재판정.
+  //       정상 실행 경로에는 아무 지연도 추가하지 않는다(성공 시 부작용 0).
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function _clickAtPoint(x, y) {
+    try {
+      const hit = document.elementFromPoint(x, y);
+      if (!hit) return false;
+      ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => {
+        try {
+          hit.dispatchEvent(new MouseEvent(t, {
+            bubbles: true, cancelable: true, clientX: x, clientY: y, view: window
+          }));
+        } catch (e) {}
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function dismissOverlayByOutsideClick(el) {
+    try {
+      const r = el ? el.getBoundingClientRect() : null;
+      // 오버레이 바깥 후보: 좌측 상단 여백 → 실패 시 요소 위쪽 여백
+      const candidates = [
+        [3, 3],
+        [Math.max(3, window.innerWidth - 4), 3],
+        [3, r ? Math.max(3, r.top - 12) : 3]
+      ];
+      for (const [x, y] of candidates) {
+        if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit) continue;
+        if (el && (hit === el || el.contains(hit) || hit.contains(el))) continue;
+        _clickAtPoint(x, y);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function pressEscapeKey() {
+    try {
+      const t = document.activeElement || document.body;
+      ['keydown', 'keypress', 'keyup'].forEach(type => {
+        try {
+          t.dispatchEvent(new KeyboardEvent(type, {
+            key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+            bubbles: true, cancelable: true, view: window
+          }));
+        } catch (e) {}
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // covered 전용 복구 래퍼 — 그 외 실패(gone/stale/hidden 등)는 즉시 반환(정직한 실패 유지)
+  async function resolveGuardedRecover(nodeId) {
+    let res = resolveGuarded(nodeId);
+    if (res.ok || res.reason !== 'covered') return res;
+
+    const el = __daonReg.nodes.get(nodeId) || null;
+
+    // 1차: 오버레이 바깥 클릭 (Escape보다 침습적이지 않음 — 페이지 자체 Escape 핸들러 오작동 방지)
+    if (dismissOverlayByOutsideClick(el)) {
+      await sleep(200);
+      res = resolveGuarded(nodeId);
+      if (res.ok || res.reason !== 'covered') return res;
+    }
+
+    // 2차: Escape (자동완성/드롭다운 확실히 닫기)
+    pressEscapeKey();
+    await sleep(200);
+    return resolveGuarded(nodeId);
   }
 
   // ── 검색 가능한 도큐먼트 수집 (메인 프레임 + 동일 출처 iframe/프레임 탐색) ────
@@ -914,8 +1105,37 @@
           value: ('value' in el) ? String(el.value ?? '').slice(0, 60) : '',
           selector: id || nameAttr || cls || tag
         });
+
+        // ── ★ [4차] SELECT 옵션 개별 노출 (jev 이식) ──────────────────────────
+        // 원본 snapshot.js L68~71: SELECT 의 각 '미선택' 옵션을 별개 액션으로 노출한다.
+        //   for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
+        //     actions.push({...base, kind:'select', value:o.value, label:base.label+' → '+o.label});
+        // 우리는 옵션 항목에 selectValue 를 실어, sidepanel 이 ACT_SELECT 로 실행하게 한다.
+        // nodeId 는 SELECT 노드를 그대로 가리킨다(옵션은 실행 대상이 아니라 선택지).
+        if (tag === 'select') {
+          const baseLabel = text;
+          for (const o of el.options) {
+            if (count >= LIMIT) break;
+            if (o.selected || o.disabled || o.closest('optgroup[disabled]')) continue;
+            items.push({
+              index: ++count,
+              nodeId,
+              tag: 'option',
+              role: 'option',
+              type: '',
+              text: `${baseLabel} → ${o.label || o.text}`.slice(0, 60),
+              value: String(o.value ?? '').slice(0, 60),
+              selectValue: String(o.value ?? ''),     // ★ ACT_SELECT 에 전달할 값
+              selector: `${id || tag} option`
+            });
+          }
+        }
       }
     }
+
+    // ★ [4차] 스냅샷 시점의 문서 전체 지문을 보관 — 실행 시점에 비교해
+    //   guard 가 못 잡는 전역 변화(SPA 라우팅/타 필드 변경)를 감지한다.
+    __daonReg.pageKey = pageKeyOf();
 
     return items;
   }
@@ -930,6 +1150,17 @@
 
     try {
       switch (request.action) {
+        // ── [2026-09-19 3차] 준비 상태 프로브 ───────────────────────────────
+        // 확장 리로드/탭 전환 직후 content script가 죽어 있는지 가볍게 확인하는 용도.
+        // sidepanel이 이 핑 실패를 감지해 content.js를 프로그래밍 방식으로 재주입한다.
+        case 'PING': {
+          sendResponse({
+            ok: true, pong: true, v: '1.1.3',
+            url: location.href, readyState: document.readyState
+          });
+          break;
+        }
+
         case 'GET_PAGE_CONTEXT': {
           const ctx = extractPageContext();
           sendResponse({ ok: true, data: ctx });
@@ -943,72 +1174,111 @@
         }
 
         case 'ACT_CLICK': {
-          let el = null;
-          // ① nodeId 경로 (권장): 스냅샷 시점 노드를 guard 검증 후 실행 — 엉뚱한 요소 클릭 차단
-          if (request.nodeId !== undefined && request.nodeId !== null) {
-            const res = resolveGuarded(Number(request.nodeId));
-            if (!res.ok) {
-              sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
-              return;
+          (async () => {
+            try {
+              let el = null;
+              // ① nodeId 경로 (권장): 스냅샷 시점 노드를 guard 검증 후 실행 — 엉뚱한 요소 클릭 차단
+              //    covered(오버레이)면 자동으로 오버레이를 걷어내고 재판정한다.
+              if (request.nodeId !== undefined && request.nodeId !== null) {
+                const res = await resolveGuardedRecover(Number(request.nodeId));
+                if (!res.ok) {
+                  sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+                  return;
+                }
+                el = res.el;
+              } else {
+                // ② 레거시 selector 경로 (하위 호환)
+                el = findElement(request.target || request.selector, request.nth || 1, { isClick: true });
+              }
+              if (!el) {
+                sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
+                return;
+              }
+              showFeedback(el, `클릭: ${request.target || '버튼'}`);
+              simulateClick(el);
+              sendResponse({
+                ok: true,
+                nodeId: __daonReg.ids.get(el) ?? null,
+                message: `클릭 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
+                url: window.location.href
+              });
+            } catch (err) {
+              sendResponse({ ok: false, error: err.message });
             }
-            el = res.el;
-          } else {
-            // ② 레거시 selector 경로 (하위 호환)
-            el = findElement(request.target || request.selector, request.nth || 1, { isClick: true });
-          }
-          if (!el) {
-            sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
-            return;
-          }
-          showFeedback(el, `클릭: ${request.target || '버튼'}`);
-          simulateClick(el);
-          sendResponse({
-            ok: true,
-            nodeId: __daonReg.ids.get(el) ?? null,
-            message: `클릭 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
-            url: window.location.href
-          });
+          })();
           break;
         }
 
         case 'ACT_HOVER': {
-          let el = null;
-          if (request.nodeId !== undefined && request.nodeId !== null) {
-            const res = resolveGuarded(Number(request.nodeId));
-            if (!res.ok) {
-              sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
-              return;
+          (async () => {
+            try {
+              let el = null;
+              if (request.nodeId !== undefined && request.nodeId !== null) {
+                const res = await resolveGuardedRecover(Number(request.nodeId));
+                if (!res.ok) {
+                  sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+                  return;
+                }
+                el = res.el;
+              } else {
+                el = findElement(request.target || request.selector, request.nth || 1, { isClick: false });
+              }
+              if (!el) {
+                sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
+                return;
+              }
+              showFeedback(el, `호버: ${request.target || '요소'}`);
+              simulateHover(el);
+              sendResponse({
+                ok: true,
+                nodeId: __daonReg.ids.get(el) ?? null,
+                message: `호버(Mouse Over) 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
+                url: window.location.href
+              });
+            } catch (err) {
+              sendResponse({ ok: false, error: err.message });
             }
-            el = res.el;
-          } else {
-            el = findElement(request.target || request.selector, request.nth || 1, { isClick: false });
-          }
-          if (!el) {
-            sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
-            return;
-          }
-          showFeedback(el, `호버: ${request.target || '요소'}`);
-          simulateHover(el);
-          sendResponse({
-            ok: true,
-            nodeId: __daonReg.ids.get(el) ?? null,
-            message: `호버(Mouse Over) 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
-            url: window.location.href
-          });
+          })();
           break;
         }
 
         case 'ACT_PRESS_KEY': {
-          const key = request.key || 'Enter';
-          let el = request.target ? findElement(request.target, request.nth || 1, { isInput: true }) : null;
-          if (el) {
-            showFeedback(el, `키: ${key}`);
-          }
-          simulateKeyPress(el, key);
-          sendResponse({
-            ok: true,
-            message: `키 입력 완료: [${key}]${el ? ` (대상: <${el.tagName.toLowerCase()}>)` : ''}`
-          });
+          (async () => {
+            try {
+              const key = request.key || 'Enter';
+              let el = null;
+              let viaNode = false;
+              // ① nodeId 경로 [2026-09-19 신설] — click/hover/type과 대칭화.
+              //    종전에는 nodeId를 아예 받지 않아 항상 document.activeElement로 갔다.
+              //    그래서 대상 입력창에 포커스가 없으면 엉뚱한 곳에 Enter가 가면서도
+              //    '성공'을 반환하는 거짓 성공이 발생했다(실측: type 실패 후 Enter가 성공으로 보고됨).
+              if (request.nodeId !== undefined && request.nodeId !== null) {
+                const res = await resolveGuardedRecover(Number(request.nodeId));
+                if (!res.ok) {
+                  sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+                  return;
+                }
+                el = res.el;
+                viaNode = true;
+              } else if (request.target) {
+                el = findElement(request.target, request.nth || 1, { isInput: true });
+              }
+              // nodeId로 지목했으면 포커스를 강제해 키가 반드시 그 요소로 가게 한다.
+              if (viaNode && el && typeof el.focus === 'function') {
+                try { el.focus(); } catch (e) {}
+              }
+              if (el) showFeedback(el, `키: ${key}`);
+              simulateKeyPress(el, key);
+              sendResponse({
+                ok: true,
+                nodeId: el ? (__daonReg.ids.get(el) ?? null) : null,
+                target: el ? `<${el.tagName.toLowerCase()}>` : '(activeElement)',
+                message: `키 입력 완료: [${key}]${el ? ` (대상: <${el.tagName.toLowerCase()}>)` : ' (대상: 현재 포커스 요소)'}`
+              });
+            } catch (err) {
+              sendResponse({ ok: false, error: err.message });
+            }
+          })();
           break;
         }
 
@@ -1017,8 +1287,9 @@
             try {
               let el = null;
               // ① nodeId 경로 (권장): 스냅샷 시점 노드를 guard 검증 후 입력
+              //    covered(자동완성 드롭다운이 입력창을 덮은 경우)면 오버레이를 걷어내고 재판정.
               if (request.nodeId !== undefined && request.nodeId !== null) {
-                const res = resolveGuarded(Number(request.nodeId));
+                const res = await resolveGuardedRecover(Number(request.nodeId));
                 if (!res.ok) {
                   sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
                   return;
@@ -1035,6 +1306,33 @@
               const visible = isElementVisible(el);
               showFeedback(el, `입력: "${request.text}"`);
               const verified = await simulateTyping(el, request.text);
+              // ── ★ [4차] combobox 제안 대기 (jev 이식) ────────────────────────
+              // 원본: "Editable ARIA comboboxes wait for visible options, capped at 200ms"
+              // 입력 직후 자동완성이 뜨는 것을 기다려 준다. 그러면 다음 액션이
+              // 'covered'(오버레이가 입력창을 덮음)로 막히는 상황이 애초에 안 생긴다.
+              // → 우리의 사후 복구(resolveGuardedRecover)를 최후 수단으로 물러나게 한다.
+              try { await waitForSuggestions(el, 200); } catch (e) {}
+              // ── [2026-09-19 2차 수정] type 자기-stale 해소 ─────────────────────
+              // 문제: guardOf()는 'value'/'aria-expanded'를 guard에 포함한다.
+              //   그래서 type이 검색창 value를 바꾸는 순간 그 노드 자체가 stale이 되고,
+              //   뒤따르는 press(Enter)/click이 "상태가 변경되었습니다"로 거부됐다.
+              //   실측: type(nodeId=4) 성공 → press Enter(nodeId=4) → stale 거부.
+              //   '입력 → Enter'는 검색의 기본 패턴이라 매번 재스냅샷을 요구하면 실사용 불가.
+              // ── ★ [4차 확장] guard 뿐 아니라 pageKey 도 재캡처 ────────────────
+              //   pageKey 에는 모든 폼 값이 들어가므로, type 은 pageKey 도 바꾼다.
+              //   재캡처하지 않으면 4차에서 추가한 지문 비교가 같은 이유로 press 를 막는다.
+              //   (type 이 변경한 상태는 '예상된 변경'이므로 새 baseline 으로 확정)
+              //   gone/disconnected/hidden 검사는 그대로 유지되므로 위험은 낮다.
+              try {
+                let nid = (request.nodeId !== undefined && request.nodeId !== null)
+                  ? Number(request.nodeId) : null;
+                if (nid === null && __daonReg.ids) nid = __daonReg.ids.get(el) ?? null;
+                if (nid !== null) {
+                  const g = guardOf(el);
+                  if (g) { __daonReg.guards.set(nid, g); __daonReg.nodes.set(nid, el); }
+                }
+                __daonReg.pageKey = pageKeyOf();   // ★ 4차: 지문도 갱신
+              } catch (e) {}
               const val = ('value' in el && typeof el.value === 'string')
                 ? el.value
                 : ((el.innerText || el.textContent || '').trim().slice(0, 50));
@@ -1044,6 +1342,83 @@
                 verified: verified && visible,
                 value: val,
                 message: `입력 완료: "${request.text}" (${visible ? '화면 표시 정상' : '경고: 숨겨진 요소에 입력됨'})`
+              });
+            } catch (err) {
+              sendResponse({ ok: false, error: err.message });
+            }
+          })();
+          break;
+        }
+
+        // ── ★ [4차] 네이티브 SELECT 옵션 선택 (jev 이식) ─────────────────────
+        // 원본 browser.py L152~157:
+        //   if (action.kind==='select') {
+        //     if (e.tagName!=='SELECT' || ![options].some(o=>o.value===action.value
+        //         && !o.disabled && !o.closest('optgroup[disabled]'))) return null;
+        //     e.value=action.value;
+        //     e.dispatchEvent(new Event('input',{bubbles:true}));
+        //     e.dispatchEvent(new Event('change',{bubbles:true}));
+        //   }
+        // 핵심: 옵션을 '관찰된 것'에서만 고르고(모델이 임의 값 생성 불가),
+        //       프레임워크가 반응하도록 input+change 를 함께 디스패치한다.
+        case 'ACT_SELECT': {
+          (async () => {
+            try {
+              let el = null;
+              if (request.nodeId !== undefined && request.nodeId !== null) {
+                const res = await resolveGuardedRecover(Number(request.nodeId));
+                if (!res.ok) {
+                  sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+                  return;
+                }
+                el = res.el;
+              } else {
+                el = findElement(request.target || request.selector, request.nth || 1);
+              }
+              if (!el) {
+                sendResponse({ ok: false, error: 'SELECT 요소를 찾을 수 없습니다.' });
+                return;
+              }
+              if (el.tagName !== 'SELECT') {
+                sendResponse({ ok: false, error: `요소 #${request.nodeId} 는 <select> 가 아닙니다 (${el.tagName}).` });
+                return;
+              }
+              const want = String(request.value ?? '');
+              // ★ 관찰된 옵션에서만 선택 — 모델이 만든 임의 문자열을 그대로 넣지 않는다
+              const opt = Array.from(el.options).find(o =>
+                (String(o.value) === want || String(o.label || o.text) === want) &&
+                !o.disabled && !o.closest('optgroup[disabled]'));
+              if (!opt) {
+                sendResponse({
+                  ok: false,
+                  error: `선택할 수 없는 옵션입니다: "${want}" (비활성/미존재). 다시 스냅샷을 찍으세요.`,
+                  available: Array.from(el.options)
+                    .filter(o => !o.disabled && !o.closest('optgroup[disabled]'))
+                    .map(o => ({ value: o.value, label: o.label || o.text }))
+                });
+                return;
+              }
+              showFeedback(el, `선택: ${opt.label || opt.text}`);
+              el.value = opt.value;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              // 재캡처 — select 도 폼 값/guard 를 바꾸므로 자기-stale 을 해소한다
+              try {
+                let nid = (request.nodeId !== undefined && request.nodeId !== null)
+                  ? Number(request.nodeId) : null;
+                if (nid === null && __daonReg.ids) nid = __daonReg.ids.get(el) ?? null;
+                if (nid !== null) {
+                  const g = guardOf(el);
+                  if (g) { __daonReg.guards.set(nid, g); __daonReg.nodes.set(nid, el); }
+                }
+                __daonReg.pageKey = pageKeyOf();
+              } catch (e) {}
+              sendResponse({
+                ok: true,
+                nodeId: __daonReg.ids.get(el) ?? null,
+                selected: opt.value,
+                label: opt.label || opt.text,
+                message: `선택 완료: "${opt.label || opt.text}" (${opt.value})`
               });
             } catch (err) {
               sendResponse({ ok: false, error: err.message });

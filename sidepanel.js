@@ -1212,16 +1212,34 @@ async function parseAndExecuteActions(text, bubble) {
   }
 
   // 스마트 내비게이션 폴백: 사용자가 이동을 요청했는데 에이전트가 태그 없이 URL만 언급한 경우
-  if (!executedAny && lastUserPrompt) {
+  // ⚠️ 2026-09-19 v1.1.4 — 안전장치 3종 (종전 조건이 헐거워 '시키지 않은 이동'이 가능했다)
+  //   ① 자율 후속 턴에서는 폴백 금지 → 사용자가 직접 보낸 턴(currentAutonomousStep <= 1)에서만
+  //   ② 현재 탭이 이미 같은 도메인이면 이동 금지 → 제자리 재이동·연쇄 이동 차단
+  //   ③ 도메인 대조가 실패하면 아무것도 하지 않음(fail-closed) → 불확실하면 이동하지 않는다
+  if (!executedAny && lastUserPrompt && currentAutonomousStep <= 1) {
     const navIntent = /이동|가줘|가자|열어|접속|틀어|navigate|go to|open/i.test(lastUserPrompt);
     if (navIntent) {
       const urlMatch = text.match(/https?:\/\/[^\s<>"')]+|\b(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|kr|co\.kr|io|dev|ai|app)\b/i);
       if (urlMatch) {
         const detectedUrl = urlMatch[0];
-        appendActionCard(bubble, `🌐 [스마트 이동 감지] 감지된 사이트 "${detectedUrl}" 로 이동합니다...`);
-        const res = await handleNavigate(detectedUrl);
-        appendActionCard(bubble, res.ok ? `✅ 이동 완료: ${res.url}` : `❌ 이동 실패: ${res.error}`);
-        if (res.ok) executedAny = true;
+        // ② 현재 탭 도메인 실시간 대조 (이 시점에만 조회 — 평상 경로 비용 0)
+        let sameSite = false;
+        try {
+          const [cur] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const curUrl = (cur && cur.url) || '';
+          const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
+          const a = hostOf(/^https?:\/\//i.test(detectedUrl) ? detectedUrl : 'https://' + detectedUrl);
+          const b = hostOf(curUrl);
+          sameSite = !!a && a === b;
+        } catch (_) {}
+        if (sameSite) {
+          appendActionCard(bubble, `ℹ️ 이미 같은 사이트에 있습니다 — 중복 이동을 건너뜁니다. (${detectedUrl})`);
+        } else {
+          appendActionCard(bubble, `🌐 [스마트 이동 감지] 감지된 사이트 "${detectedUrl}" 로 이동합니다...`);
+          const res = await handleNavigate(detectedUrl);
+          appendActionCard(bubble, res.ok ? `✅ 이동 완료: ${res.url}` : `❌ 이동 실패: ${res.error}`);
+          if (res.ok) executedAny = true;
+        }
       }
     }
   }

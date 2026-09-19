@@ -9,5 +9,8 @@ Desktop.ini
 __pycache__/
 node_modules/
 
-# 배포 산출물 (Releases에만 첨부)
+# 배포 산출물 — Vercel 배포 페이지가 downloads/ 에서 서빙하므로 추적한다
+# (GitHub Releases 첨부는 별도로 유지)
 *.zip
+!downloads/daon-browser-agent.zip
+.vercel/

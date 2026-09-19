@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DAON Browser Agent — 크롬 사이드 패널 확장</title>
+  <meta name="description" content="DAON Agent System 전용 크롬 사이드 패널 확장 프로그램. 로그인된 실제 웹 환경을 직접 조작합니다." />
+  <meta name="theme-color" content="#010314" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap"
+    rel="stylesheet" />
+  <style>
+    :root {
+      --void: #010314;
+      --surface: #0b0c1c;
+      --surface-2: #171825;
+      --border: #2a2b3a;
+      --border-soft: #343543;
+      --uv: #8e64ff;
+      --uv-light: #b88cff;
+      --frost: #dfe1f4;
+      --mist: #9fa2b9;
+      --fog: #6b7280;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      background: var(--void);
+      color: var(--frost);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(900px 500px at 15% -8%, rgba(142, 100, 255, .16), transparent 65%),
+        radial-gradient(700px 420px at 88% 8%, rgba(52, 53, 67, .5), transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px 96px;
+    }
+
+    /* ---------- 헤더 ---------- */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 28px 0 0;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: rgba(142, 100, 255, .14);
+      border: 1px solid rgba(142, 100, 255, .5);
+      display: grid;
+      place-items: center;
+      color: var(--uv-light);
+      font-family: "Space Mono", monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .brand-name {
+      font-weight: 700;
+      letter-spacing: -.01em;
+      color: #fff;
+      font-size: 17px;
+    }
+
+    .brand-name span {
+      color: var(--fog);
+      font-weight: 500;
+      font-size: 14px;
+    }
+
+    .gh-link {
+      font-size: 13px;
+      color: var(--mist);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 16px;
+      transition: .2s;
+      font-family: "Space Mono", monospace;
+    }
+
+    .gh-link:hover {
+      border-color: var(--uv);
+      color: #fff;
+    }
+
+    /* ---------- 히어로 ---------- */
+    .hero {
+      padding: 72px 0 56px;
+      text-align: center;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      font-family: "Space Mono", monospace;
+      font-size: 11px;
+      letter-spacing: .18em;
+      color: var(--uv-light);
+      border: 1px solid rgba(142, 100, 255, .35);
+      background: rgba(142, 100, 255, .08);
+      border-radius: 999px;
+      padding: 6px 16px;
+      margin-bottom: 22px;
+    }
+
+    h1 {
+      font-size: clamp(30px, 5.4vw, 50px);
+      line-height: 1.12;
+      letter-spacing: -.03em;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 18px;
+    }
+
+    h1 em {
+      font-style: normal;
+      background: linear-gradient(100deg, var(--uv-light), #6ea8ff 70%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .lede {
+      color: var(--mist);
+      font-size: 16px;
+      max-width: 620px;
+      margin: 0 auto 34px;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn-primary {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      background: linear-gradient(180deg, #9b74ff, #7a4dff);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 16px;
+      padding: 15px 40px;
+      border-radius: 999px;
+      box-shadow: 0 10px 34px -10px rgba(142, 100, 255, .75);
+      transition: transform .18s, box-shadow .18s;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 16px 40px -10px rgba(142, 100, 255, .9);
+    }
+
+    .btn-primary small {
+      font-family: "Space Mono", monospace;
+      font-weight: 400;
+      font-size: 11px;
+      opacity: .82;
+      letter-spacing: .04em;
+    }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--mist);
+      text-decoration: none;
+      font-size: 15px;
+      padding: 15px 32px;
+      border-radius: 999px;
+      transition: .2s;
+    }
+
+    .btn-ghost:hover {
+      border-color: var(--uv);
+      color: #fff;
+    }
+
+    .meta-line {
+      margin-top: 20px;
+      font-family: "Space Mono", monospace;
+      font-size: 12px;
+      color: var(--fog);
+    }
+
+    /* ---------- 경고 ---------- */
+    .notice {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      background: rgba(255, 176, 32, .06);
+      border: 1px solid rgba(255, 176, 32, .28);
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin: 0 0 56px;
+      font-size: 14px;
+      color: #f0d9a8;
+    }
+
+    .notice b {
+      color: #ffd57a;
+      white-space: nowrap;
+    }
+
+    .notice code {
+      font-family: "Space Mono", monospace;
+      background: rgba(255, 255, 255, .07);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12.5px;
+    }
+
+    /* ---------- 섹션 ---------- */
+    section {
+      margin-bottom: 64px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin-bottom: 26px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+    }
+
+    .sec-num {
+      font-family: "Space Mono", monospace;
+      font-size: 12px;
+      color: var(--uv-light);
+      letter-spacing: .1em;
+    }
+
+    h2 {
+      font-size: 21px;
+      letter-spacing: -.02em;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    /* ---------- 설치 단계 ---------- */
+    ol.steps {
+      list-style: none;
+      counter-reset: s;
+      display: grid;
+      gap: 12px;
+    }
+
+    ol.steps li {
+      counter-increment: s;
+      position: relative;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px 18px 62px;
+      font-size: 14.5px;
+      color: var(--frost);
+    }
+
+    ol.steps li::before {
+      content: counter(s, decimal-leading-zero);
+      position: absolute;
+      left: 20px;
+      top: 17px;
+      font-family: "Space Mono", monospace;
+      font-size: 13px;
+      color: var(--uv-light);
+      opacity: .85;
+    }
+
+    ol.steps strong {
+      color: #fff;
+    }
+
+    code.inline {
+      font-family: "Space Mono", monospace;
+      background: rgba(142, 100, 255, .14);
+      border: 1px solid rgba(142, 100, 255, .28);
+      color: var(--uv-light);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 12.5px;
+    }
+
+    /* ---------- 기능 그리드 ---------- */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px;
+    }
+
+    .feat {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      transition: border-color .2s;
+    }
+
+    .feat:hover {
+      border-color: rgba(142, 100, 255, .55);
+    }
+
+    .feat h3 {
+      font-size: 15px;
+      color: #fff;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .feat p {
+      font-size: 13.5px;
+      color: var(--mist);
+    }
+
+    /* ---------- 표 ---------- */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      font-family: "Space Mono", monospace;
+      font-size: 11px;
+      letter-spacing: .1em;
+      color: var(--fog);
+      font-weight: 400;
+      text-transform: uppercase;
+    }
+
+    td:first-child {
+      color: var(--mist);
+      white-space: nowrap;
+      width: 34%;
+    }
+
+    td:last-child {
+      color: var(--frost);
+    }
+
+    /* ---------- 푸터 ---------- */
+    footer {
+      border-top: 1px solid var(--border);
+      padding-top: 30px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: var(--fog);
+    }
+
+    footer a {
+      color: var(--mist);
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+    }
+
+    footer a:hover {
+      color: var(--uv-light);
+      border-color: rgba(142, 100, 255, .5);
+    }
+
+    @media (max-width: 560px) {
+      .hero {
+        padding: 48px 0 40px;
+      }
+
+      ol.steps li {
+        padding: 16px 18px 16px 54px;
+      }
+
+      td:first-child {
+        width: auto;
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="brand-mark">D</div>
+        <div class="brand-name">DAON <span>Browser Agent</span></div>
+      </div>
+      <a class="gh-link" href="https://github.com/ttl0988k-cmyk/daon-browser-agent" target="_blank"
+        rel="noopener">GitHub ↗</a>
+    </header>
+
+    <div class="hero">
+      <div class="eyebrow">CHROME SIDE PANEL EXTENSION</div>
+      <h1>보고 있는 페이지를,<br /><em>직접 조작</em>합니다.</h1>
+      <p class="lede">
+        DAON Browser Agent는 크롬 우측 사이드 패널에 다온을 상주시킵니다.
+        페이지 요약·분석부터 검색창 타이핑, 버튼 클릭, 스크롤까지 — 로그인된 실제 웹 환경에서 그대로 실행합니다.
+      </p>
+      <div class="cta-row">
+        <a class="btn-primary" href="downloads/daon-browser-agent.zip" download>
+          확장 프로그램 받기
+          <small id="zip-meta">v1.1.5 · ZIP</small>
+        </a>
+        <a class="btn-ghost" href="#install">설치 방법 보기</a>
+      </div>
+      <div class="meta-line">Chrome · Brave · Edge &nbsp;/&nbsp; Manifest V3 &nbsp;/&nbsp; MIT License</div>
+    </div>
+
+    <div class="notice">
+      <b>⚠ 선행 요구사항</b>
+      <div>
+        이 확장은 <b>DAON Agent System 데스크톱 앱</b>과 함께 사용하는 클라이언트입니다.
+        단독으로는 동작하지 않으며, 다온 앱이 <code>127.0.0.1:9090</code> 에서 실행 중이어야 합니다.
+      </div>
+    </div>
+
+    <section id="install">
+      <div class="sec-head">
+        <span class="sec-num">01</span>
+        <h2>설치 (30초)</h2>
+      </div>
+      <ol class="steps">
+        <li>위 <strong>「확장 프로그램 받기」</strong> 버튼으로 ZIP을 내려받아 <strong>압축을 풉니다.</strong>
+          (압축을 풀면 <code class="inline">daon-browser-agent</code> 폴더가 나옵니다 — 지우지 마세요.)</li>
+        <li><strong>Google Chrome</strong> 을 엽니다.</li>
+        <li>주소창에 <code class="inline">chrome://extensions/</code> 를 입력해 이동합니다.</li>
+        <li>우측 상단 <strong>[개발자 모드]</strong> 토글을 켭니다.</li>
+        <li>좌측 상단 <strong>[압축해제된 확장 프로그램을 로드합니다]</strong> 를 눌러 방금 푼
+          <code class="inline">daon-browser-agent</code> 폴더를 선택합니다.</li>
+        <li>툴바 퍼즐 아이콘 → <strong>DAON Browser Agent</strong> 핀(📌)을 눌러 고정합니다.</li>
+      </ol>
+    </section>
+
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">02</span>
+        <h2>무엇을 하나요</h2>
+      </div>
+      <div class="grid">
+        <div class="feat">
+          <h3>📄 페이지 읽기</h3>
+          <p>[탭 컨텍스트 첨부] 한 번으로 복사·붙여넣기 없이 현재 페이지를 즉시 읽고 요약합니다.</p>
+        </div>
+        <div class="feat">
+          <h3>⌨️ 직접 타이핑</h3>
+          <p>검색창·폼 입력을 사람 리듬(25~65ms)으로 입력해 봇 감지를 회피합니다.</p>
+        </div>
+        <div class="feat">
+          <h3>🖱️ 요소 클릭</h3>
+          <p>스냅샷으로 잡은 정확한 요소만 누릅니다. 페이지가 바뀌면 실행을 자동 거부합니다.</p>
+        </div>
+        <div class="feat">
+          <h3>🔒 격리 제어</h3>
+          <p>ActiveTab 권한 기반 — 필요한 탭에서만 동작하고 나머지는 건드리지 않습니다.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">03</span>
+        <h2>사양</h2>
+      </div>
+      <table>
+        <tr>
+          <th>항목</th>
+          <th>값</th>
+        </tr>
+        <tr>
+          <td>지원 브라우저</td>
+          <td>Chrome, Brave, Edge (Chromium 기반)</td>
+        </tr>
+        <tr>
+          <td>매니페스트</td>
+          <td>Manifest V3</td>
+        </tr>
+        <tr>
+          <td>권한</td>
+          <td>activeTab 격리 제어 · sidePanel · storage</td>
+        </tr>
+        <tr>
+          <td>선행 요구</td>
+          <td>DAON Agent System 데스크톱 앱 (127.0.0.1:9090)</td>
+        </tr>
+        <tr>
+          <td>라이선스</td>
+          <td>MIT</td>
+        </tr>
+      </table>
+    </section>
+
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">04</span>
+        <h2>문제 해결</h2>
+      </div>
+      <table>
+        <tr>
+          <th>증상</th>
+          <th>해결</th>
+        </tr>
+        <tr>
+          <td>사이드 패널이 안 열림</td>
+          <td><code class="inline">chrome://extensions/</code> 에서 확장이 <strong>켜짐</strong> 상태인지 확인 후, 툴바 아이콘을 클릭하세요.</td>
+        </tr>
+        <tr>
+          <td>연결이 안 됨 (🔴)</td>
+          <td>다온 데스크톱 앱이 실행 중인지 확인하세요. 앱 기동까지 최대 1분 걸릴 수 있습니다.</td>
+        </tr>
+        <tr>
+          <td>엉뚱한 요소를 클릭함</td>
+          <td>페이지가 바뀐 뒤 옛 스냅샷을 쓴 경우입니다. 다시 스냅샷을 찍으면 최신 요소로 갱신됩니다.</td>
+        </tr>
+        <tr>
+          <td>업데이트 방법</td>
+          <td>새 ZIP으로 폴더를 교체한 뒤 <code class="inline">chrome://extensions/</code> 에서 <strong>새로고침(⟳)</strong> 을 누르세요.</td>
+        </tr>
+      </table>
+    </section>
+
+    <footer>
+      <div>DAON Agent System · 자기진화형 로컬 AI 에이전트 런타임</div>
+      <div>
+        <a href="https://github.com/ttl0988k-cmyk/daon-browser-agent/releases/latest" target="_blank" rel="noopener">Releases</a>
+        &nbsp;·&nbsp;
+        <a href="https://daon-download.vercel.app" target="_blank" rel="noopener">통합 다운로드</a>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // ZIP 실측 크기를 표시 (하드코딩 방지 — 배포마다 자동 갱신)
+    fetch('downloads/daon-browser-agent.zip', { method: 'HEAD' })
+      .then(r => {
+        const len = r.headers.get('content-length');
+        if (len) {
+          const kb = Math.round(parseInt(len, 10) / 1024);
+          const el = document.getElementById('zip-meta');
+          if (el) el.textContent = 'v1.1.5 · ' + kb + 'KB';
+        }
+      })
+      .catch(() => { });
+  </script>
+</body>
+
+</html>

@@ -14,3 +14,6 @@ node_modules/
 *.zip
 !downloads/daon-browser-agent.zip
 .vercel/
+
+.vercel
+.env*

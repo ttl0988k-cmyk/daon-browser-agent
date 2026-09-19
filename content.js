@@ -53,7 +53,10 @@
   function isElementVisible(el) {
     if (!el) return false;
     try {
-      const style = window.getComputedStyle(el);
+      // iframe 내부 요소는 그 프레임의 뷰로 계산해야 정확하다.
+      // 메인 window.getComputedStyle(el) 은 다른 문서의 요소에 대해 신뢰할 수 없다.
+      const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+      const style = win.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
         return false;
       }
@@ -169,6 +172,12 @@
   // hit-test: 요소가 다른 것에 가려졌는지 (jev는 입력 직전 기하를 재해석한다)
   function isCovered(el) {
     try {
+      // ⚠️ 다른 문서(iframe 내부)의 요소는 좌표계가 다르다.
+      //    el.getBoundingClientRect() 는 그 프레임 기준인데 document.elementFromPoint 는
+      //    메인 문서 기준이라, 그대로 비교하면 항상 covered 로 오판해 클릭이 막힌다.
+      //    잘못 막는 것보다 기존 동작을 유지하는 편이 안전하므로 hit-test 를 건너뛴다.
+      if (el.ownerDocument && el.ownerDocument !== document) return false;
+
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return true;
       const dx = Math.max(1, Math.min(4, r.width / 4));

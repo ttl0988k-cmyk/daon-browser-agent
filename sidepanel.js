@@ -1219,7 +1219,12 @@ async function parseAndExecuteActions(text, bubble) {
   if (!executedAny && lastUserPrompt && currentAutonomousStep <= 1) {
     const navIntent = /이동|가줘|가자|열어|접속|틀어|navigate|go to|open/i.test(lastUserPrompt);
     if (navIntent) {
-      const urlMatch = text.match(/https?:\/\/[^\s<>"')]+|\b(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|kr|co\.kr|io|dev|ai|app)\b/i);
+      // ★ v1.1.5 — URL 은 '사용자 발화'에서만 추출한다.
+      //   종전에는 어시스턴트 응답(text)에서 추출해, 에이전트가 보고서에 사이트 주소를
+      //   '설명조로 언급하기만' 해도 그쪽으로 강제 이동하는 사고가 났다.
+      //   실측(2026-09-19 23:24:56): 보고서의 "naver.com → 301 → www.naver.com" 문구가
+      //   URL 로 채택되어 탭이 naver.com 으로 튕김(transition 0x18000000 FROM_API).
+      const urlMatch = lastUserPrompt.match(/https?:\/\/[^\s<>"')]+|\b(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|kr|co\.kr|io|dev|ai|app)\b/i);
       if (urlMatch) {
         const detectedUrl = urlMatch[0];
         // ② 현재 탭 도메인 실시간 대조 (이 시점에만 조회 — 평상 경로 비용 0)

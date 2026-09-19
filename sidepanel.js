@@ -685,8 +685,8 @@ async function sendMessage(customText = null, isAutoFollowup = false) {
 2. [직전 액션 결과 자동 인지]: 당신이 실행한 조작의 성공/실패 결과는 위 [직전 브라우저 액션 실행 결과]로 즉시 보고됩니다. 따라서 조작 후 사용자에게 "확인해주세요"라고 되묻지 마세요!
 3. [브라우저 전용 액션 태그 사용 필수]: 데스크톱용 내부 브라우저 도구(browser_*)나 터미널/파이썬 스크립트 도구를 쓰지 마세요. 웹페이지 조작 및 입력은 오직 아래의 XML 액션 태그(<daon_action ... />)를 사용해야 실제 브라우저에서 즉각 실행됩니다.
 4. [실시간 조작 액션 태그]: 브라우저 조작이 필요할 때는 반드시 아래의 XML 액션 태그를 응답에 포함하세요. 크롬 확장 프로그램이 실제 브라우저에서 즉시 실행합니다:
-   - 버튼/카드/링크 클릭: <daon_action action="click" target="버튼텍스트 또는 CSS셀렉터" nth="1" />
-   - 마우스 호버(드롭다운/메뉴 열기): <daon_action action="hover" target="메뉴텍스트 또는 셀렉터" nth="1" />
+   - 버튼/카드/링크 클릭: <daon_action action="click" nodeId="12" />  ★권장  /  또는 <daon_action action="click" target="버튼텍스트 또는 CSS셀렉터" nth="1" />
+   - 마우스 호버(드롭다운/메뉴 열기): <daon_action action="hover" nodeId="12" />  ★권장  /  또는 <daon_action action="hover" target="메뉴텍스트 또는 셀렉터" nth="1" />
    - 키보드 입력(Enter, Escape 등): <daon_action action="press" key="Enter" target="입력창(선택)" />
    - 대화형 요소 스냅샷 추출: <daon_action action="snapshot" />
    - 현재 화면 캡처(스크린샷): <daon_action action="screenshot" />
@@ -695,8 +695,13 @@ async function sendMessage(customText = null, isAutoFollowup = false) {
    - 새 탭 열기: <daon_action action="new_tab" url="https://..." />
    - 탭 전환: <daon_action action="switch_tab" tab_id="탭ID" />
    - 탭 닫기: <daon_action action="close_tab" tab_id="탭ID" />
-   - 텍스트 입력: <daon_action action="type" target="입력창ID/셀렉터" text="입력내용" nth="1" />
+   - 텍스트 입력: <daon_action action="type" nodeId="3" text="입력내용" />  ★권장  /  또는 <daon_action action="type" target="입력창ID/셀렉터" text="입력내용" nth="1" />
    - 스크롤: <daon_action action="scroll" direction="down|up" />
+   ⚠️ [요소 지정 규칙 — nodeId 우선 (필수)]:
+   - 먼저 <daon_action action="snapshot" /> 로 스냅샷을 찍으면 각 요소에 nodeId가 함께 표시됩니다. 예: [#3|nodeId=7] <button> "검색"
+   - 클릭/호버/입력은 반드시 그 nodeId로 지정하세요 (예: <daon_action action="click" nodeId="7" />). nodeId는 스냅샷 시점의 정확한 요소를 가리킵니다.
+   - 스냅샷 이후 페이지가 바뀌면 실행이 자동으로 거부됩니다(엉뚱한 요소 조작 방지). 이때 [⚠️ 페이지 변경 감지] 안내가 오므로, 다시 스냅샷을 찍고 새 nodeId로 재시도하세요. 같은 nodeId로 반복 시도하지 마세요.
+   - nodeId가 없는 요소에 한해서만 target=셀렉터를 사용하세요.
    ⚠️ [텍스트/프롬프트 입력 필수 규칙 — 구글 플로우/ChatGPT 등 봇 감지 회피]:
    - 단어, 문장, 검색어, 프롬프트 등 모든 텍스트는 반드시 단 1개의 <daon_action action="type" target="프롬프트창 또는 셀렉터" text="완전한 문자열" /> 태그로 입력하세요!
    - 확장 프로그램 시스템이 브라우저 내부에서 실제 사람처럼 한 글자씩 무작위 지연(25~65ms)을 주며 휴먼 리듬으로 자동 타이핑하므로, 봇 감지가 완벽히 회피됩니다.
@@ -942,6 +947,12 @@ async function parseAndExecuteActions(text, bubble) {
     const nth = parseInt(getAttr('nth') || '1', 10) || 1;
     const keyVal = getAttr('key') || 'Enter';
     const waitMs = parseInt(getAttr('ms') || '1000', 10) || 1000;
+    // ★ nodeId: 스냅샷이 부여한 런타임 신원 (2026-09-19 jev guard 이식)
+    //   스냅샷→실행 사이 DOM이 바뀌면 guard 검증에서 실행이 거부된다(엉뚱한 요소 조작 차단).
+    //   nodeId가 있으면 target보다 우선한다.
+    const rawNodeId = getAttr('nodeid') || getAttr('node_id');
+    const nodeIdVal = (rawNodeId !== null && rawNodeId !== '' && !isNaN(Number(rawNodeId)))
+      ? Number(rawNodeId) : null;
 
     // 1. 사이트 이동 (navigate / goto / open_url)
     if ((action === 'navigate' || action === 'goto' || action === 'open_url') && (urlVal || target)) {
@@ -975,20 +986,30 @@ async function parseAndExecuteActions(text, bubble) {
       updateActionCard(card, res.ok ? `✅ 탭 닫기 완료` : `❌ 닫기 실패: ${res.error}`, !res.ok);
       lastActionResults.push({ summary: `CLOSE_TAB("${ident || '현재 탭'}"): ${res.ok ? '성공' : '실패'}` });
     }
-    // 5. 클릭 (click) — nth 다중 매칭 지원
-    else if (action === 'click' && target) {
-      const card = appendActionCard(bubble, `🖱️ [클릭] "${target}"${nth > 1 ? ` (${nth}번째)` : ''} 시도 중...`);
-      const res = await executeBrowserAction('ACT_CLICK', { target, nth });
+    // 5. 클릭 (click) — nodeId 우선, nth 다중 매칭 지원
+    else if (action === 'click' && (target || nodeIdVal !== null)) {
+      const label = nodeIdVal !== null ? `요소 #${nodeIdVal}` : `"${target}"`;
+      const card = appendActionCard(bubble, `🖱️ [클릭] ${label}${nth > 1 ? ` (${nth}번째)` : ''} 시도 중...`);
+      const res = await executeBrowserAction('ACT_CLICK',
+        nodeIdVal !== null ? { nodeId: nodeIdVal } : { target, nth });
       updateActionCard(card, res.ok ? `✅ ${res.message}` : `❌ 클릭 실패: ${res.error}`, !res.ok);
-      lastActionResults.push({ summary: `CLICK("${target}"${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` });
+      lastActionResults.push({
+        summary: `CLICK(${label}${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
+          (res.stale ? ' [⚠️ 페이지 변경 감지 — 페이지가 바뀌었으니 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
+      });
       if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
     }
     // 6. 마우스 호버 (hover)
-    else if (action === 'hover' && target) {
-      const card = appendActionCard(bubble, `🔍 [호버] "${target}"${nth > 1 ? ` (${nth}번째)` : ''} 마우스 호버 중...`);
-      const res = await executeBrowserAction('ACT_HOVER', { target, nth });
+    else if (action === 'hover' && (target || nodeIdVal !== null)) {
+      const label = nodeIdVal !== null ? `요소 #${nodeIdVal}` : `"${target}"`;
+      const card = appendActionCard(bubble, `🔍 [호버] ${label}${nth > 1 ? ` (${nth}번째)` : ''} 마우스 호버 중...`);
+      const res = await executeBrowserAction('ACT_HOVER',
+        nodeIdVal !== null ? { nodeId: nodeIdVal } : { target, nth });
       updateActionCard(card, res.ok ? `✅ ${res.message}` : `❌ 호버 실패: ${res.error}`, !res.ok);
-      lastActionResults.push({ summary: `HOVER("${target}"${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` });
+      lastActionResults.push({
+        summary: `HOVER(${label}${nth > 1 ? `, nth=${nth}` : ''}): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
+          (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
+      });
       if (res.ok) await new Promise(resolve => setTimeout(resolve, 200));
     }
     // 7. 키보드 입력 (press / key)
@@ -999,12 +1020,17 @@ async function parseAndExecuteActions(text, bubble) {
       lastActionResults.push({ summary: `PRESS_KEY("${keyVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` });
       if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
     }
-    // 8. 텍스트 입력 (type)
-    else if (action === 'type' && target) {
-      const card = appendActionCard(bubble, `⌨️ [입력] "${target}"에 "${inputVal}" 입력 중...`);
-      const res = await executeBrowserAction('ACT_TYPE', { target, text: inputVal, nth });
+    // 8. 텍스트 입력 (type) — nodeId 우선
+    else if (action === 'type' && (target || nodeIdVal !== null)) {
+      const label = nodeIdVal !== null ? `요소 #${nodeIdVal}` : `"${target}"`;
+      const card = appendActionCard(bubble, `⌨️ [입력] ${label}에 "${inputVal}" 입력 중...`);
+      const res = await executeBrowserAction('ACT_TYPE',
+        nodeIdVal !== null ? { nodeId: nodeIdVal, text: inputVal } : { target, text: inputVal, nth });
       updateActionCard(card, res.ok ? `✅ ${res.message}` : `❌ 입력 실패: ${res.error}`, !res.ok);
-      lastActionResults.push({ summary: `TYPE("${target}", "${inputVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` });
+      lastActionResults.push({
+        summary: `TYPE(${label}, "${inputVal}"): ${res.ok ? '성공' : '실패'} — ${res.ok ? res.message : res.error}` +
+          (res.stale ? ' [⚠️ 페이지 변경 감지 — 다시 스냅샷을 찍고 새 nodeId로 재시도하세요]' : '')
+      });
       if (res.ok) await new Promise(resolve => setTimeout(resolve, 300));
     }
     // 9. 잠시 대기 (wait) — 0.5초 이하는 카드를 띄우지 않고 조용히 대기 (화면 도배 방지)
@@ -1049,7 +1075,11 @@ async function parseAndExecuteActions(text, bubble) {
       const card = appendActionCard(bubble, `📸 [스냅샷] 대화형 요소 추출 중...`);
       const res = await executeBrowserAction('GET_PAGE_SNAPSHOT');
       if (res && res.ok && Array.isArray(res.data)) {
-        const summary = res.data.slice(0, 30).map(it => `[#${it.index}] <${it.tag}> "${it.text}" (${it.selector})`).join('\n');
+        // ★ nodeId를 함께 노출 — 클릭/입력 시 selector 재탐색 대신 nodeId로 지정하면
+        //   스냅샷 시점과 동일한 요소가 보장되고, 페이지가 바뀌면 실행이 거부된다.
+        const summary = res.data.slice(0, 30).map(it =>
+          `[#${it.index}|nodeId=${it.nodeId}] <${it.role || it.tag}> "${it.text}"${it.value ? ` 값="${it.value}"` : ''} (${it.selector})`
+        ).join('\n');
         updateActionCard(card, `✅ 스냅샷 완료 (총 ${res.data.length}개 요소 감지)`);
         lastActionResults.push({ summary: `SNAPSHOT(): 성공 (총 ${res.data.length}개 대화형 요소 감지됨):\n${summary}` });
       } else {
@@ -1279,7 +1309,9 @@ function setupEventListeners() {
       try {
         const res = await chrome.tabs.sendMessage(activeTab.id, { action: 'GET_PAGE_SNAPSHOT' }, { frameId: 0 });
         if (res && res.ok && res.data) {
-          const list = res.data.map(i => `[#${i.index}] <${i.tag}> "${i.text}" (셀렉터: ${i.selector})`).join('\n');
+          const list = res.data.map(i =>
+            `[#${i.index}|nodeId=${i.nodeId}] <${i.role || i.tag}> "${i.text}"${i.value ? ` 값="${i.value}"` : ''} (셀렉터: ${i.selector})`
+          ).join('\n');
           sendMessage(`이 페이지에서 발견된 대화형 요소 목록입니다:\n${list}\n\n이 중에서 어떤 동작을 수행할 수 있는지 추천해줘.`);
         }
       } catch (e) {

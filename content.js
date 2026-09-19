@@ -67,6 +67,169 @@
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 요소 레지스트리 + guard — jev-ultrafast 이식 (2026-09-19)
+  // ──────────────────────────────────────────────────────────────────────────
+  // 문제: 기존 실행 경로는 스냅샷의 selector 문자열로 요소를 '재탐색'했다.
+  //       스냅샷 → 클릭 사이에 DOM이 바뀌면 같은 셀렉터가 다른 요소를 가리켜
+  //       엉뚱한 클릭이 발생했다. (검증 단계 없음)
+  // 해결: 스냅샷 시점에 노드 신원(WeakMap)과 의미(guard)를 보관하고,
+  //       실행 직전에 재검증한다. 기하는 저장하지 않고 입력 직전 재해석 + hit-test.
+  // ══════════════════════════════════════════════════════════════════════════
+  const __daonReg = (window.__daonReg ||= {
+    ids: new WeakMap(),     // el → nodeId
+    nodes: new Map(),       // nodeId → el
+    guards: new Map(),      // nodeId → guard 스냅샷
+    next: 1
+  });
+
+  function regIdentity(el) {
+    if (!__daonReg.ids.has(el)) __daonReg.ids.set(el, __daonReg.next++);
+    const id = __daonReg.ids.get(el);
+    __daonReg.nodes.set(id, el);
+    return id;
+  }
+
+  // 끊긴 노드 정리 (누수 방지)
+  function regPrune() {
+    for (const [id, el] of __daonReg.nodes) {
+      if (!el || !el.isConnected) {
+        __daonReg.nodes.delete(id);
+        __daonReg.guards.delete(id);
+      }
+    }
+  }
+
+  // 접근성 이름 계산 — jev snapshot.js name() 이식
+  function accName(el, seen = new Set()) {
+    if (!el || seen.has(el)) return '';
+    seen.add(el);
+    const referenced = (el.getAttribute('aria-labelledby') || '')
+      .split(/\s+/).map(id => accName(document.getElementById(id), seen))
+      .filter(Boolean).join(' ');
+    return referenced || el.getAttribute('aria-label') ||
+      [...(el.labels || [])].map(l => accName(l, seen)).filter(Boolean).join(' ') ||
+      (['button', 'submit', 'reset'].includes(el.type) ? el.value : '') ||
+      el.getAttribute('alt') ||
+      (el.tagName === 'INPUT' ? '' : [...el.childNodes].map(n =>
+        n.nodeType === 3 ? n.textContent :
+        (n.nodeType === 1 && n.getAttribute('aria-hidden') !== 'true') ? accName(n, seen) : ''
+      ).join(' ').trim()) ||
+      el.getAttribute('title') || el.getAttribute('placeholder') || '';
+  }
+
+  // 역할 판정 — jev snapshot.js role() 이식
+  const ACC_ROLES = ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
+    'menuitemradio', 'option', 'gridcell', 'combobox', 'textbox', 'searchbox', 'spinbutton'];
+
+  function accRole(el) {
+    const explicit = el.getAttribute('role');
+    if (ACC_ROLES.includes(explicit)) return explicit;
+    if (el.tagName === 'BUTTON' || el.tagName === 'SUMMARY') return 'button';
+    if (el.tagName === 'A') return 'link';
+    if (el.tagName === 'SELECT') return 'combobox';
+    if (el.tagName === 'TEXTAREA' || el.isContentEditable) return 'textbox';
+    if (el.tagName === 'INPUT') {
+      if (['checkbox', 'radio'].includes(el.type)) return el.type;
+      if (['button', 'submit', 'reset', 'image'].includes(el.type)) return 'button';
+      if (el.type === 'search') return 'searchbox';
+      if (el.type === 'number') return 'spinbutton';
+      if (['text', 'email', 'url', 'tel'].includes(el.type)) return 'textbox';
+    }
+    return null;
+  }
+
+  // guard 스냅샷: 신원 + 의미. 기하(rect)는 저장하지 않는다(실행 직전 재해석).
+  function guardOf(el) {
+    if (!el || !el.isConnected) return null;
+    let visible = true;
+    try { visible = isElementVisible(el); } catch (e) { visible = false; }
+    if (!visible) return null;
+    let scope = null;
+    try {
+      scope = el.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || el.parentElement;
+    } catch (e) {}
+    return [
+      accRole(el),
+      accName(el),
+      ('value' in el) ? (el.value ?? null) : null,
+      ('checked' in el) ? (el.checked ?? null) : null,
+      (el.tagName === 'SELECT') ? (el.selectedIndex ?? null) : null,
+      ('readOnly' in el) ? (el.readOnly ?? null) : null,
+      (typeof el.matches === 'function') ? el.matches(':disabled') : null,
+      el.getAttribute('aria-disabled'),
+      el.getAttribute('aria-expanded'),
+      el.getAttribute('aria-checked'),
+      el.getAttribute('aria-selected'),
+      el.getAttribute('href'),
+      (scope && scope.innerText ? scope.innerText : '').slice(0, 6000)
+    ];
+  }
+
+  // hit-test: 요소가 다른 것에 가려졌는지 (jev는 입력 직전 기하를 재해석한다)
+  function isCovered(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return true;
+      const dx = Math.max(1, Math.min(4, r.width / 4));
+      const dy = Math.max(1, Math.min(4, r.height / 4));
+      const pts = [
+        [r.left + r.width / 2, r.top + r.height / 2],
+        [r.left + dx, r.top + dy],
+        [r.right - dx, r.bottom - dy]
+      ];
+      for (const [x, y] of pts) {
+        if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return true;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit) return true;
+        if (hit !== el && !el.contains(hit) && !hit.contains(el)) return true;
+      }
+      return false;
+    } catch (e) {
+      return false;   // 판정 불가 시 기존 동작 유지 (fail-open)
+    }
+  }
+
+  // nodeId 해석 + guard 검증. 통과할 때만 요소를 돌려준다.
+  function resolveGuarded(nodeId) {
+    const el = __daonReg.nodes.get(nodeId);
+    if (!el) {
+      return { ok: false, reason: 'gone', error: `요소 #${nodeId}를 찾을 수 없습니다. 다시 스냅샷을 찍으세요.` };
+    }
+    if (!el.isConnected) {
+      __daonReg.nodes.delete(nodeId);
+      __daonReg.guards.delete(nodeId);
+      return { ok: false, reason: 'disconnected', error: `요소 #${nodeId}가 페이지에서 제거되었습니다(DOM 변경). 다시 스냅샷을 찍으세요.` };
+    }
+    if (!isElementVisible(el)) {
+      return { ok: false, reason: 'hidden', error: `요소 #${nodeId}가 더 이상 보이지 않습니다(숨김/이동). 다시 스냅샷을 찍으세요.` };
+    }
+    const before = __daonReg.guards.get(nodeId);
+    if (before) {
+      const now = guardOf(el);
+      if (!now) {
+        return { ok: false, reason: 'unobservable', error: `요소 #${nodeId}의 상태를 읽을 수 없습니다. 다시 스냅샷을 찍으세요.` };
+      }
+      const FIELDS = ['role', 'name', 'value', 'checked', 'selectedIndex', 'readOnly',
+        'disabled', 'aria-disabled', 'aria-expanded', 'aria-checked', 'aria-selected', 'href'];
+      const changed = [];
+      const len = Math.min(before.length - 1, now.length - 1);   // 마지막(scope 텍스트)은 제외
+      for (let i = 0; i < len; i++) {
+        if (String(before[i] ?? '') !== String(now[i] ?? '')) changed.push(FIELDS[i] || `f${i}`);
+      }
+      if (changed.length) {
+        return {
+          ok: false, reason: 'stale', changed,
+          error: `요소 #${nodeId}의 상태가 스냅샷 이후 변경되었습니다(${changed.join(', ')}). 다시 스냅샷을 찍으세요.`
+        };
+      }
+    }
+    if (isCovered(el)) {
+      return { ok: false, reason: 'covered', error: `요소 #${nodeId}가 다른 요소에 가려져 있습니다(오버레이/스크롤). 다시 스냅샷을 찍으세요.` };
+    }
+    return { ok: true, el };
+  }
+
   // ── 검색 가능한 도큐먼트 수집 (메인 프레임 + 동일 출처 iframe/프레임 탐색) ────
   function getSearchableDocuments() {
     const docs = [document];
@@ -681,30 +844,66 @@
   }
 
   // ── 대화형 요소 스냅샷 추출 (Agent Grounding — 메인 + iframe 통합) ────────
+  // ⚠️ 2026-09-19 개편: 각 요소에 nodeId(런타임 신원)와 guard를 부여한다.
+  //    실행 시 selector 재탐색 대신 nodeId로 지정하면 스냅샷 시점과 동일한 요소가 보장된다.
   function extractInteractiveSnapshot() {
+    regPrune();
     const docs = getSearchableDocuments();
     const items = [];
     let count = 0;
+    const LIMIT = 250;
+
+    const SELECTOR = 'a, button, input, select, textarea, summary, [contenteditable="true"], ' +
+      '[role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], ' +
+      '[role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"], ' +
+      '[role="combobox"], [role="textbox"], [role="searchbox"], [role="spinbutton"]';
 
     for (const doc of docs) {
-      if (count >= 50) break;
-      const elements = Array.from(doc.querySelectorAll('a, button, input, select, textarea, [role="button"]'));
+      if (count >= LIMIT) break;
+      const elements = Array.from(doc.querySelectorAll(SELECTOR));
       for (const el of elements) {
-        if (count >= 50) break;
+        if (count >= LIMIT) break;
         if (!isElementVisible(el)) continue;
+        if (['password', 'file', 'hidden'].includes(el.type)) continue;
+        if (typeof el.matches === 'function' &&
+            (el.matches(':disabled') || el.closest('[aria-disabled="true"]'))) continue;
+
+        // 뷰포트 밖 요소 제외 (jev: 중심 좌표가 화면 내)
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+        if (cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight) continue;
+
+        // ★ 신원 + guard 등록
+        const nodeId = regIdentity(el);
+        const guard = guardOf(el);
+        if (guard) __daonReg.guards.set(nodeId, guard);
 
         const tag = el.tagName.toLowerCase();
+        const role = accRole(el) || tag;
         const type = el.type || '';
-        const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim();
+        const accname = accName(el).replace(/\s+/g, ' ').trim();
+        const text = (accname || el.innerText || el.value || el.placeholder ||
+                      el.getAttribute('aria-label') || '').trim();
+
         const id = el.id ? `#${el.id}` : '';
-        const name = el.getAttribute('name') ? `[name="${el.getAttribute('name')}"]` : '';
+        const nameAttr = el.getAttribute('name') ? `[name="${el.getAttribute('name')}"]` : '';
+        // 안전한 클래스명만 셀렉터로 (특수문자 포함 시 깨짐)
+        let cls = '';
+        if (!id && !nameAttr && typeof el.className === 'string' && el.className.trim()) {
+          const first = el.className.trim().split(/\s+/)[0];
+          if (/^[A-Za-z_-][A-Za-z0-9_-]*$/.test(first)) cls = `.${first}`;
+        }
 
         items.push({
           index: ++count,
+          nodeId,                               // ★ 실행 시 이 값으로 지정 (권장)
           tag,
+          role,
           type,
-          text: text.slice(0, 40),
-          selector: id || name || (el.className ? `.${el.className.split(' ')[0]}` : tag)
+          text: text.slice(0, 60),
+          value: ('value' in el) ? String(el.value ?? '').slice(0, 60) : '',
+          selector: id || nameAttr || cls || tag
         });
       }
     }
@@ -735,7 +934,19 @@
         }
 
         case 'ACT_CLICK': {
-          const el = findElement(request.target || request.selector, request.nth || 1, { isClick: true });
+          let el = null;
+          // ① nodeId 경로 (권장): 스냅샷 시점 노드를 guard 검증 후 실행 — 엉뚱한 요소 클릭 차단
+          if (request.nodeId !== undefined && request.nodeId !== null) {
+            const res = resolveGuarded(Number(request.nodeId));
+            if (!res.ok) {
+              sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+              return;
+            }
+            el = res.el;
+          } else {
+            // ② 레거시 selector 경로 (하위 호환)
+            el = findElement(request.target || request.selector, request.nth || 1, { isClick: true });
+          }
           if (!el) {
             sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
             return;
@@ -744,6 +955,7 @@
           simulateClick(el);
           sendResponse({
             ok: true,
+            nodeId: __daonReg.ids.get(el) ?? null,
             message: `클릭 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
             url: window.location.href
           });
@@ -751,7 +963,17 @@
         }
 
         case 'ACT_HOVER': {
-          const el = findElement(request.target || request.selector, request.nth || 1, { isClick: false });
+          let el = null;
+          if (request.nodeId !== undefined && request.nodeId !== null) {
+            const res = resolveGuarded(Number(request.nodeId));
+            if (!res.ok) {
+              sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+              return;
+            }
+            el = res.el;
+          } else {
+            el = findElement(request.target || request.selector, request.nth || 1, { isClick: false });
+          }
           if (!el) {
             sendResponse({ ok: false, error: `요소를 찾을 수 없습니다: "${request.target || request.selector}" (nth: ${request.nth || 1})` });
             return;
@@ -760,6 +982,7 @@
           simulateHover(el);
           sendResponse({
             ok: true,
+            nodeId: __daonReg.ids.get(el) ?? null,
             message: `호버(Mouse Over) 완료: <${el.tagName.toLowerCase()}> "${(el.innerText || el.value || '').trim().slice(0, 30)}"`,
             url: window.location.href
           });
@@ -783,7 +1006,19 @@
         case 'ACT_TYPE': {
           (async () => {
             try {
-              const el = findElement(request.target || request.selector, request.nth || 1, { isInput: true });
+              let el = null;
+              // ① nodeId 경로 (권장): 스냅샷 시점 노드를 guard 검증 후 입력
+              if (request.nodeId !== undefined && request.nodeId !== null) {
+                const res = resolveGuarded(Number(request.nodeId));
+                if (!res.ok) {
+                  sendResponse({ ok: false, stale: true, reason: res.reason, error: res.error });
+                  return;
+                }
+                el = res.el;
+              } else {
+                // ② 레거시 selector 경로 (하위 호환)
+                el = findElement(request.target || request.selector, request.nth || 1, { isInput: true });
+              }
               if (!el) {
                 sendResponse({ ok: false, error: `입력 필드를 찾을 수 없습니다: "${request.target || request.selector}"` });
                 return;
@@ -796,6 +1031,7 @@
                 : ((el.innerText || el.textContent || '').trim().slice(0, 50));
               sendResponse({
                 ok: true,
+                nodeId: __daonReg.ids.get(el) ?? null,
                 verified: verified && visible,
                 value: val,
                 message: `입력 완료: "${request.text}" (${visible ? '화면 표시 정상' : '경고: 숨겨진 요소에 입력됨'})`
